@@ -1,0 +1,1 @@
+"""Time entry module placeholder."""
