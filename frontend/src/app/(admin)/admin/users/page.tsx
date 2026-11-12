@@ -6,7 +6,21 @@ import { AdminIntro } from "@/components/admin/AdminShell";
 import { cardClass, fieldClass, labelClass, primaryButtonClass } from "@/constants/ui";
 import { apiError } from "@/services/api";
 import type { ApiUser } from "@/services/employee";
-import { createUser, fetchOrganizations, fetchUsers, type OrgRecord } from "@/services/admin";
+import { createUser, fetchOrganizations, fetchUsers, updateUserLimits, type OrgRecord } from "@/services/admin";
+
+function limitDrafts(people: ApiUser[]) {
+  return Object.fromEntries(
+    people
+      .filter((user) => user.systemRole === "employee")
+      .map((user) => [
+        user.id,
+        {
+          minimumHours: String(user.configurationData?.minimumHours ?? user.dailyTargetHours),
+          maximumHours: String(user.configurationData?.maximumHours ?? user.dailyTargetHours),
+        },
+      ]),
+  );
+}
 
 export default function UsersPage() {
   const [organizations, setOrganizations] = useState<OrgRecord[]>([]);
@@ -21,6 +35,8 @@ export default function UsersPage() {
   const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingId, setSavingId] = useState("");
+  const [limits, setLimits] = useState<Record<string, { minimumHours: string; maximumHours: string }>>({});
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -30,6 +46,7 @@ export default function UsersPage() {
         if (cancelled) return;
         setOrganizations(orgs);
         setUsers(people);
+        setLimits(limitDrafts(people));
         setOrganizationId(orgs[0]?.id ?? "");
       })
       .catch((err: unknown) => {
@@ -44,6 +61,27 @@ export default function UsersPage() {
   }, []);
 
   const visible = filter ? users.filter((user) => user.organizationId === filter) : users;
+
+  const saveLimits = async (user: ApiUser) => {
+    const draft = limits[user.id];
+    const minimumHours = Number(draft?.minimumHours);
+    const maximumHours = Number(draft?.maximumHours);
+    if (!Number.isFinite(minimumHours) || !Number.isFinite(maximumHours) || minimumHours <= 0 || maximumHours < minimumHours || maximumHours > 24) {
+      toast.error("Maximum must be at least the minimum, and both must be within 24 hours");
+      return;
+    }
+    setSavingId(user.id);
+    try {
+      const saved = await updateUserLimits(user.id, { minimumHours, maximumHours });
+      setUsers((current) => current.map((item) => (item.id === saved.id ? saved : item)));
+      setLimits((current) => ({ ...current, ...limitDrafts([saved]) }));
+      toast.success("Daily limits saved");
+    } catch (err) {
+      toast.error(apiError(err, "Could not save daily limits"));
+    } finally {
+      setSavingId("");
+    }
+  };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -63,6 +101,7 @@ export default function UsersPage() {
         jobTitle: jobTitle.trim() || "Team member",
       });
       setUsers((current) => [...current, created].sort((a, b) => a.firstName.localeCompare(b.firstName)));
+      setLimits((current) => ({ ...current, ...limitDrafts([created]) }));
       setFirstName("");
       setLastName("");
       setEmail("");
@@ -77,7 +116,10 @@ export default function UsersPage() {
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      <AdminIntro title="People" text="Create an admin or an employee and assign them to an organization." />
+      <AdminIntro
+        title="People"
+        text="Create an admin or an employee and assign them to an organization. Daily minimum and maximum hours can be set here for employees."
+      />
       <form onSubmit={handleSubmit} className={`${cardClass} grid gap-4 p-5 sm:grid-cols-2`}>
         <div>
           <label className={labelClass} htmlFor="user-first">
@@ -158,18 +200,20 @@ export default function UsersPage() {
               <th className="px-4 py-3 font-medium">Organization</th>
               <th className="px-4 py-3 font-medium">Access</th>
               <th className="px-4 py-3 font-medium">Job title</th>
+              <th className="px-4 py-3 font-medium">Minimum</th>
+              <th className="px-4 py-3 font-medium">Maximum</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               <tr>
-                <td className="px-4 py-6 text-gray-500" colSpan={5}>
+                <td className="px-4 py-6 text-gray-500" colSpan={7}>
                   Loading people...
                 </td>
               </tr>
             ) : visible.length === 0 ? (
               <tr>
-                <td className="px-4 py-6 text-gray-500" colSpan={5}>
+                <td className="px-4 py-6 text-gray-500" colSpan={7}>
                   No people match this filter.
                 </td>
               </tr>
@@ -193,6 +237,65 @@ export default function UsersPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-gray-500 dark:text-gray-400">{user.jobTitle}</td>
+                  {user.systemRole === "employee" ? (
+                    <>
+                      <td className="px-4 py-3">
+                        <input
+                          aria-label={`Minimum hours for ${user.firstName} ${user.lastName}`}
+                          type="number"
+                          min={0.5}
+                          max={24}
+                          step={0.5}
+                          value={limits[user.id]?.minimumHours ?? ""}
+                          onChange={(event) =>
+                            setLimits((current) => ({
+                              ...current,
+                              [user.id]: {
+                                minimumHours: event.target.value,
+                                maximumHours: current[user.id]?.maximumHours ?? "",
+                              },
+                            }))
+                          }
+                          className="w-20 rounded-lg border border-gray-300 px-2 py-1 dark:border-gray-700 dark:bg-gray-900"
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <input
+                            aria-label={`Maximum hours for ${user.firstName} ${user.lastName}`}
+                            type="number"
+                            min={0.5}
+                            max={24}
+                            step={0.5}
+                            value={limits[user.id]?.maximumHours ?? ""}
+                            onChange={(event) =>
+                              setLimits((current) => ({
+                                ...current,
+                                [user.id]: {
+                                  minimumHours: current[user.id]?.minimumHours ?? "",
+                                  maximumHours: event.target.value,
+                                },
+                              }))
+                            }
+                            className="w-20 rounded-lg border border-gray-300 px-2 py-1 dark:border-gray-700 dark:bg-gray-900"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void saveLimits(user)}
+                            disabled={savingId === user.id}
+                            className="rounded-lg bg-primary-600 px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                          >
+                            {savingId === user.id ? "Saving" : "Save"}
+                          </button>
+                        </div>
+                      </td>
+                    </>
+                  ) : (
+                    <>
+                      <td className="px-4 py-3 text-gray-400">—</td>
+                      <td className="px-4 py-3 text-gray-400">—</td>
+                    </>
+                  )}
                 </tr>
               ))
             )}

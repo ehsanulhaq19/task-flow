@@ -19,6 +19,10 @@ export interface User {
   systemRole: "admin" | "employee";
   organizationName: string;
   dailyTargetHours: number;
+  configurationData: {
+    minimumHours: number;
+    maximumHours: number;
+  };
 }
 
 export interface Task {

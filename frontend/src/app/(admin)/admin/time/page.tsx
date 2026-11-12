@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { HiOutlineChevronDown } from "react-icons/hi2";
 import { AdminIntro } from "@/components/admin/AdminShell";
+import AdminTimeChart from "@/components/admin/AdminTimeChart";
 import { cardClass, fieldClass } from "@/constants/ui";
 import { formatDateTime, formatHours } from "@/lib/format";
 import { apiError } from "@/services/api";
@@ -16,7 +17,12 @@ import {
   type AdminScreenshot,
   type AdminTimeEntry,
   type OrgRecord,
+  type TimeLogSeries,
 } from "@/services/admin";
+import { useAppSelector } from "@/store/store";
+
+const PAGE_SIZE = 10;
+type DateRange = "daily" | "weekly" | "monthly";
 
 function duration(entry: AdminTimeEntry) {
   if (!entry.endedAt) return "Running";
@@ -63,11 +69,16 @@ function ShotCard({ shot, onOpen }: { shot: AdminScreenshot; onOpen: (shot: Admi
 }
 
 export default function TimeLogsPage() {
+  const me = useAppSelector((state) => state.auth.user);
   const [organizations, setOrganizations] = useState<OrgRecord[]>([]);
   const [users, setUsers] = useState<ApiUser[]>([]);
   const [entries, setEntries] = useState<AdminTimeEntry[]>([]);
+  const [series, setSeries] = useState<TimeLogSeries[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [organizationId, setOrganizationId] = useState("");
   const [userId, setUserId] = useState("");
+  const [dateRange, setDateRange] = useState<DateRange>("daily");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
@@ -91,15 +102,26 @@ export default function TimeLogsPage() {
   }, []);
 
   useEffect(() => {
+    if (!organizationId && me?.organizationId) setOrganizationId(me.organizationId);
+  }, [me, organizationId]);
+
+  useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setOpenId(null);
     fetchTimeEntries({
       organizationId: organizationId || undefined,
       userId: userId || undefined,
+      range: dateRange,
+      page,
+      pageSize: PAGE_SIZE,
     })
-      .then((rows) => {
-        if (!cancelled) setEntries(rows);
+      .then((result) => {
+        if (!cancelled) {
+          setEntries(result.items);
+          setSeries(result.series);
+          setTotal(result.total);
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(apiError(err, "Could not load time logs"));
@@ -110,9 +132,11 @@ export default function TimeLogsPage() {
     return () => {
       cancelled = true;
     };
-  }, [organizationId, userId]);
+  }, [organizationId, userId, dateRange, page]);
 
-  const people = organizationId ? users.filter((user) => user.organizationId === organizationId) : users;
+  const people = users.filter(
+    (user) => user.systemRole !== "admin" && (!organizationId || user.organizationId === organizationId),
+  );
 
   const toggleShots = (entryId: string) => {
     if (openId === entryId) {
@@ -132,9 +156,9 @@ export default function TimeLogsPage() {
     <div className="mx-auto max-w-5xl space-y-6">
       <AdminIntro
         title="Time logs"
-        text="Each duration opens the screenshots captured while that person was timed in."
+        text="Hours for employees in one organization. Admins are not included. Each duration opens the screenshots captured while that person was timed in."
       />
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         <select
           className={fieldClass}
           value={organizationId}
@@ -142,16 +166,24 @@ export default function TimeLogsPage() {
           onChange={(event) => {
             setOrganizationId(event.target.value);
             setUserId("");
+            setPage(1);
           }}
         >
-          <option value="">All organizations</option>
           {organizations.map((org) => (
             <option key={org.id} value={org.id}>
               {org.name}
             </option>
           ))}
         </select>
-        <select className={fieldClass} value={userId} aria-label="Person" onChange={(event) => setUserId(event.target.value)}>
+        <select
+          className={fieldClass}
+          value={userId}
+          aria-label="Person"
+          onChange={(event) => {
+            setUserId(event.target.value);
+            setPage(1);
+          }}
+        >
           <option value="">All people</option>
           {people.map((user) => (
             <option key={user.id} value={user.id}>
@@ -159,8 +191,22 @@ export default function TimeLogsPage() {
             </option>
           ))}
         </select>
+        <select
+          className={fieldClass}
+          value={dateRange}
+          aria-label="Date range"
+          onChange={(event) => {
+            setDateRange(event.target.value as DateRange);
+            setPage(1);
+          }}
+        >
+          <option value="daily">Daily — last 14 days</option>
+          <option value="weekly">Weekly — last 12 weeks</option>
+          <option value="monthly">Monthly — last 12 months</option>
+        </select>
       </div>
       {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+      <AdminTimeChart range={dateRange} series={series} />
       <div className={`${cardClass} overflow-x-auto`}>
         <table className="min-w-full text-left text-sm">
           <thead className="border-b border-gray-100 text-xs uppercase tracking-wide text-gray-500 dark:border-gray-800 dark:text-gray-400">
@@ -247,6 +293,29 @@ export default function TimeLogsPage() {
             )}
           </tbody>
         </table>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-sm text-gray-500">
+        <p>
+          {total === 0 ? "0 time logs" : `${(page - 1) * PAGE_SIZE + 1}–${Math.min(page * PAGE_SIZE, total)} of ${total}`}
+        </p>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40 dark:border-gray-700"
+            disabled={page <= 1 || loading}
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            className="rounded-lg border border-gray-300 px-3 py-1.5 disabled:opacity-40 dark:border-gray-700"
+            disabled={page * PAGE_SIZE >= total || loading}
+            onClick={() => setPage((current) => current + 1)}
+          >
+            Next
+          </button>
+        </div>
       </div>
       {preview ? (
         <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">

@@ -55,6 +55,7 @@ export default function AdminTaskModal({ task, users, onClose, onSaved, onDelete
           jobTitle: "",
           organizationName: task.organizationName,
           dailyTargetHours: 8,
+          configurationData: { minimumHours: 8, maximumHours: 10 },
         },
         ...inOrg,
       ];

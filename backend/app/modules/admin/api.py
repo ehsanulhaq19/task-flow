@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import BadRequestException
 from app.database import get_db
 from app.dependencies import get_current_admin
 from app.modules.admin.schemas import (
@@ -16,11 +17,12 @@ from app.modules.admin.schemas import (
     AdminTaskMove,
     AdminTaskResponse,
     AdminTaskUpdate,
-    AdminTimeEntryResponse,
+    AdminTimeLogPage,
     OrganizationCreate,
     OrganizationResponse,
     TaskImportResult,
     UserCreate,
+    UserLimitsUpdate,
 )
 from app.modules.admin.service import (
     add_task_comment,
@@ -39,6 +41,7 @@ from app.modules.admin.service import (
     list_tasks,
     list_time_entries,
     list_users,
+    update_user_limits,
     screenshot_path,
     summary,
 )
@@ -95,6 +98,17 @@ async def add_user(
 ):
     """Create a user and assign them to an organization."""
     return await create_user(db, payload)
+
+
+@router.patch("/users/{user_id}", response_model=UserResponse)
+async def change_user_limits(
+    user_id: uuid.UUID,
+    payload: UserLimitsUpdate,
+    _: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set an employee's daily minimum and maximum hours."""
+    return await update_user_limits(db, user_id, payload)
 
 
 @router.get("/tasks", response_model=list[AdminTaskResponse])
@@ -193,15 +207,20 @@ async def create_task_comment(
     return await add_task_comment(db, admin, task_id, payload.body)
 
 
-@router.get("/time-entries", response_model=list[AdminTimeEntryResponse])
+@router.get("/time-entries", response_model=AdminTimeLogPage)
 async def read_time_entries(
     organization_id: uuid.UUID | None = Query(None, alias="organizationId"),
     user_id: uuid.UUID | None = Query(None, alias="userId"),
-    _: User = Depends(get_current_admin),
+    date_range: str = Query("daily", alias="range"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, alias="pageSize", ge=1, le=50),
+    admin: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List time logs, filtered by organization or user."""
-    return await list_time_entries(db, organization_id, user_id)
+    """List one page of time logs and the chart for that organization and date range."""
+    if date_range not in {"daily", "weekly", "monthly"}:
+        raise BadRequestException("Date range must be daily, weekly, or monthly")
+    return await list_time_entries(db, admin, organization_id, user_id, date_range, page, page_size)
 
 
 @router.get("/time-entries/{time_entry_id}/screenshots", response_model=list[AdminScreenshotResponse])

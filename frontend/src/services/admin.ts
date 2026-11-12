@@ -95,6 +95,11 @@ export async function createUser(body: {
   return data;
 }
 
+export async function updateUserLimits(userId: string, body: { minimumHours: number; maximumHours: number }) {
+  const { data } = await api.patch<ApiUser>(`/admin/users/${userId}`, body);
+  return data;
+}
+
 export async function fetchAdminTasks(organizationId?: string) {
   const { data } = await api.get<AdminTask[]>("/admin/tasks", {
     params: organizationId ? { organizationId } : undefined,
@@ -182,8 +187,37 @@ export async function importAdminTasks(
   return data;
 }
 
-export async function fetchTimeEntries(filters: { organizationId?: string; userId?: string }) {
-  const { data } = await api.get<AdminTimeEntry[]>("/admin/time-entries", { params: filters });
+export type TimeLogPoint = {
+  label: string;
+  full: string;
+  hours: number;
+  minimumHours: number;
+  maximumHours: number;
+};
+
+export type TimeLogSeries = {
+  userId: string;
+  userName: string;
+  points: TimeLogPoint[];
+};
+
+export type TimeLogPage = {
+  items: AdminTimeEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  range: "daily" | "weekly" | "monthly";
+  series: TimeLogSeries[];
+};
+
+export async function fetchTimeEntries(filters: {
+  organizationId?: string;
+  userId?: string;
+  range: "daily" | "weekly" | "monthly";
+  page: number;
+  pageSize: number;
+}) {
+  const { data } = await api.get<TimeLogPage>("/admin/time-entries", { params: filters });
   return data;
 }
 

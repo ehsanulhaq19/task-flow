@@ -13,6 +13,7 @@ import StatCard from "@/components/StatCard";
 import TimerCard from "@/components/TimerCard";
 import { useNow } from "@/hooks/useNow";
 import { formatDay, formatHours, formatRange, formatTime, greeting, whenLabel } from "@/lib/format";
+import { dayLimits } from "@/lib/dayLimits";
 import { lastDayRange, lastTimeIn, lastTimeOut, lastWeekRange, recentDays, sumOverlap } from "@/lib/time";
 import { selectCurrentTask, selectOpenSession } from "@/store/selectors";
 import { useAppSelector } from "@/store/store";
@@ -79,7 +80,12 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <CurrentTaskCard task={current} timing={Boolean(open && current && open.taskId === current.id)} />
-        <HoursChart points={recentDays(sessions, 7, now)} />
+        <HoursChart
+          points={recentDays(sessions, 7, now).map((point) => ({
+            ...point,
+            ...dayLimits(user),
+          }))}
+        />
       </div>
 
       <RecentSessions sessions={sessions} tasks={tasks} now={nowMs} />

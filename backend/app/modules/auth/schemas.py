@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class TokenResponse(BaseModel):
@@ -33,6 +33,21 @@ class UserResponse(BaseModel):
     job_title: str = Field(serialization_alias="jobTitle")
     organization_name: str = Field(serialization_alias="organizationName")
     daily_target_hours: float = Field(serialization_alias="dailyTargetHours")
+    configuration_data: dict = Field(default_factory=dict, serialization_alias="configurationData")
+
+    @model_validator(mode="after")
+    def expose_day_limits(self):
+        """Employees always expose a daily minimum and maximum. Admins do not."""
+        if self.role != "employee":
+            self.configuration_data = {}
+            return self
+        data = dict(self.configuration_data or {})
+        minimum = float(data.get("minimumHours") or self.daily_target_hours or 8)
+        maximum = float(data.get("maximumHours") or minimum)
+        if maximum < minimum:
+            maximum = minimum
+        self.configuration_data = {"minimumHours": minimum, "maximumHours": maximum}
+        return self
 
 
 class UserUpdate(BaseModel):

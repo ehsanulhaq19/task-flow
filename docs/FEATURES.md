@@ -50,7 +50,7 @@ Sidebar: Dashboard, Tasks, Settings, theme, logout. A page-name loader shows whi
 
 - `/dashboard`: last time in/out, today and week hours, current in-progress task, start/stop timer. The timer dropdown lists only `in_progress` tasks.
 - `/tasks`: Kanban (`backlog`, `todo`, `in_progress`, `in_review`, `done`). Drag moves a card. Search, priority filter, and “Mine”. Each column has its own sort, recently updated or task name. Plus on a column opens the task modal.
-- `/settings`: profile and daily target hours, theme. No demo restore.
+- `/settings`: profile and theme. Daily minimum and maximum are set by an admin. No demo restore.
 
 Task modal (`frontend/src/components/TaskModal.tsx`):
 
@@ -61,6 +61,11 @@ Task modal (`frontend/src/components/TaskModal.tsx`):
 Timer (`frontend/src/components/TimerCard.tsx`, `frontend/src/services/screenCapture.ts`):
 
 - Start/stop records a time entry. It does not record video.
+- Starting opens a dialog with the hours still needed to reach today's minimum. If today's hours are already at the maximum, the dialog says to rest and does not start unless the employee chooses to start anyway.
+- Stopping opens a dialog with the hours still needed, or that the daily limit is reached.
+- The timer progress runs from zero to the maximum, with a mark at the minimum. It is red under the minimum and green once the minimum is reached.
+- The navbar timer uses the same colors, including when the timer is idle.
+- The dashboard chart draws the daily minimum and maximum over the last 7 days. A day under the minimum is red. A day at or above the minimum is green.
 - On start, the browser asks to share the screen once. The track stays paused between shots.
 - While the timer is open, one JPEG is taken at a random gap of 1 to 10 minutes inclusive and `POST`ed to `/api/screenshots`.
 - The shot is linked to the open time entry. Stopping the timer or logging out stops capture.
@@ -72,16 +77,16 @@ Platform admin. An admin manages every organization, not only their own. Nav: Ov
 
 - `/admin`: counts. The screenshots card links to time logs.
 - `/admin/organizations`: create an organization. Slug is generated, with a numeric suffix when the name collides. An explicit slug that is taken returns 409.
-- `/admin/users`: create an admin or employee and assign them to an organization.
+- `/admin/users`: create an admin or employee and assign them to an organization. Each employee has a daily minimum and maximum, stored in `users.configuration_data`. Only an admin can change those hours, from this screen. Admins have no daily limits.
 - `/admin/tasks`: Kanban of tasks, the same board as the employee tasks page. Filter by organization or show all. Each column has its own sort, recently updated or task name. Checkboxes select cards for bulk delete. Plus on a column opens a create dialog. Assignee choices are only people in the selected organization. Dragging a card `PATCH`es its status. Each card shows organization name (when viewing all) and a comment-count badge. Clicking a card opens the task editor: title, description, status, priority, assignee (people in that task's organization), labels, and comments. Import opens a dialog: choose a CSV (`task name`, `description`, `assignee email`, `priority`), watch a progress bar, or download a sample CSV. Imported tasks start in Backlog. With an organization selected, every assignee email must belong to it. With all organizations, each task is created in the assignee's organization. Valid rows are saved; invalid rows are listed and skipped.
-- `/admin/time`: time logs. Each duration is a dropdown. Opening it fetches screenshots for that time entry and can open a full-size preview.
+- `/admin/time`: time logs for employees in one organization, defaulting to the admin's organization. Admins are omitted from the person list, the chart, and the rows. Date range is daily (14 days), weekly (12 weeks), or monthly (12 months). An empty person filter charts and lists every employee in that organization. The chart is above the rows and shows each person's logged hours against their minimum and maximum (scaled by the days in the bucket). One selected person also gets those limits as dashed lines. Rows are paged 10 at a time and only include entries that overlap the selected range. Each duration is a dropdown. Opening it fetches screenshots for that time entry and can open a full-size preview.
 - `/admin/screenshots` redirects to `/admin/time`.
 
 ## Daily email
 
 `app/modules/cron/scheduler.py` starts an APScheduler `AsyncIOScheduler` in the FastAPI lifespan. One job, `daily_hours_email`, runs at `REPORT_HOUR`:`REPORT_MINUTE` in `REPORT_TIMEZONE` (default 23:59 `Asia/Karachi`).
 
-The email is plain text. Recipients are every active admin. The body lists every active user with organization name, the report date, local session times clipped to that calendar day, and logged hours. Open sessions count until now. Users with zero hours are included. A successful `email_logs` row for that subject and recipient skips a second send the same day. If SMTP is missing or there is no active admin, the job logs and does not send. Failures are caught so the scheduler stays up.
+The email is plain text. Recipients are every active admin. The body lists every active employee, not admins, with organization name, the report date, that person's daily minimum and maximum, local session times clipped to that calendar day, and logged hours. Open sessions count until now. Employees with zero hours are included. A successful `email_logs` row for that subject and recipient skips a second send the same day. If SMTP is missing or there is no active admin, the job logs and does not send. Failures are caught so the scheduler stays up.
 
 SMTP settings live in `taskflow/backend/.env` (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS`). They match the CareerMiner mail account. Do not print the password.
 
@@ -109,7 +114,7 @@ UUID primary keys, `timestamptz`. Organization delete cascades to users, tasks, 
 - `screenshots`: org, user, time entry SET NULL, `stored_path`, `taken_at`
 - `email_logs`: subject, content, attachment name, to/from, response, status `success`|`error`
 
-Migrations: `0001_initial`, `0002_task_assignee`, `0003_email_logs`, `0004_task_comments`. `alembic upgrade head` runs on backend container start. `backend/alembic/env.py` imports the models.
+Migrations: `0001_initial`, `0002_task_assignee`, `0003_email_logs`, `0004_task_comments`, `0005_user_configuration`. `alembic upgrade head` runs on backend container start. `backend/alembic/env.py` imports the models.
 
 Screenshots are files under `/root/apps/taskflow/storage/screenshots`, mounted at `/data/screenshots`. Database stores a relative path `{user_id}/{uuid}.jpg`. Do not store them only in the container writable layer.
 

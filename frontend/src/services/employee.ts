@@ -11,6 +11,10 @@ export type ApiUser = {
   jobTitle: string;
   organizationName: string;
   dailyTargetHours: number;
+  configurationData?: {
+    minimumHours?: number;
+    maximumHours?: number;
+  };
 };
 
 export type TaskInput = {
@@ -47,6 +51,13 @@ export function mapUser(raw: ApiUser) {
     systemRole: raw.systemRole,
     organizationName: raw.organizationName,
     dailyTargetHours: raw.dailyTargetHours,
+    configurationData: {
+      minimumHours: raw.configurationData?.minimumHours ?? raw.dailyTargetHours,
+      maximumHours: Math.max(
+        raw.configurationData?.minimumHours ?? raw.dailyTargetHours,
+        raw.configurationData?.maximumHours ?? raw.dailyTargetHours,
+      ),
+    },
   };
 }
 

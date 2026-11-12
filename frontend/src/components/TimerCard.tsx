@@ -3,9 +3,12 @@
 import { useEffect, useState } from "react";
 import { HiOutlinePlay, HiOutlineStop } from "react-icons/hi2";
 import toast from "react-hot-toast";
+import DayLimitDialog from "@/components/DayLimitDialog";
 import { cardClass, fieldClass } from "@/constants/ui";
+import { dayLimits, dayStatus, startTimerMessage, stopTimerMessage } from "@/lib/dayLimits";
 import { formatClock, formatHours } from "@/lib/format";
 import { sumOverlap, todayRange } from "@/lib/time";
+import { fullName } from "@/lib/user";
 import { beginScreenCapture, stopScreenCapture } from "@/services/screenCapture";
 import { startTimer, stopTimer } from "@/store/slices/timeSlice";
 import { selectOpenSession } from "@/store/selectors";
@@ -17,15 +20,21 @@ type TimerCardProps = {
 
 export default function TimerCard({ now }: TimerCardProps) {
   const dispatch = useAppDispatch();
+  const user = useAppSelector((state) => state.auth.user);
   const tasks = useAppSelector((state) => state.tasks.tasks);
   const sessions = useAppSelector((state) => state.time.sessions);
-  const target = useAppSelector((state) => state.settings.dailyTargetHours);
   const open = useAppSelector(selectOpenSession);
   const [selectedId, setSelectedId] = useState("");
+  const [notice, setNotice] = useState("");
+  const [pendingStart, setPendingStart] = useState(false);
+  const limits = dayLimits(user);
+  const me = user ? fullName(user) : "";
+  const mineInProgress = tasks.filter((task) => {
+    if (task.status !== "in_progress") return false;
+    return task.assigneeUserId ? task.assigneeUserId === user?.id : task.assignee === me;
+  });
 
-  const currentInProgress = tasks
-    .filter((task) => task.status === "in_progress")
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  const currentInProgress = [...mineInProgress].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
 
   useEffect(() => {
     if (open) return;
@@ -33,21 +42,25 @@ export default function TimerCard({ now }: TimerCardProps) {
   }, [open, currentInProgress?.id]);
 
   const activeTask = open?.taskId ? tasks.find((task) => task.id === open.taskId) ?? null : null;
-  const inProgress = tasks
-    .filter((task) => task.status === "in_progress")
-    .sort((a, b) => a.key.localeCompare(b.key));
+  const inProgress = [...mineInProgress].sort((a, b) => a.key.localeCompare(b.key));
   const elapsed = open ? Math.max(0, now - new Date(open.startedAt).getTime()) : 0;
   const today = todayRange(new Date(now));
   const todayMs = sumOverlap(sessions, today.start, today.end, now);
-  const targetMs = target * 3_600_000;
-  const progress = targetMs > 0 ? Math.min(100, Math.round((todayMs / targetMs) * 100)) : 0;
+  const minimumMs = limits.minimumHours * 3_600_000;
+  const maximumMs = limits.maximumHours * 3_600_000;
+  const progress = maximumMs > 0 ? Math.min(100, (todayMs / maximumMs) * 100) : 0;
+  const minimumMark = maximumMs > 0 ? Math.min(100, (minimumMs / maximumMs) * 100) : 0;
+  const underMinimum = dayStatus(todayMs, limits) === "under";
+  const overLimit = notice === "You are exceeded to daily hours limit, take some rest.";
 
-  const handleStart = async () => {
+  const beginTiming = async () => {
     const task = inProgress.find((item) => item.id === selectedId);
     if (!task) {
       toast.error("Choose a task that is in progress");
       return;
     }
+    setNotice("");
+    setPendingStart(false);
     void beginScreenCapture().catch(() => {
       toast.error("Allow screen sharing to save screenshots");
     });
@@ -60,14 +73,31 @@ export default function TimerCard({ now }: TimerCardProps) {
     }
   };
 
+  const requestStart = () => {
+    const task = inProgress.find((item) => item.id === selectedId);
+    if (!task) {
+      toast.error("Choose a task that is in progress");
+      return;
+    }
+    setPendingStart(true);
+    setNotice(startTimerMessage(todayMs, limits));
+  };
+
   const handleStop = async () => {
+    const message = stopTimerMessage(todayMs, limits);
     try {
       await dispatch(stopTimer()).unwrap();
       stopScreenCapture();
-      toast.success("Timed out");
+      setPendingStart(false);
+      setNotice(message);
     } catch (err) {
       toast.error(typeof err === "string" ? err : "Could not stop the timer");
     }
+  };
+
+  const closeNotice = () => {
+    setNotice("");
+    setPendingStart(false);
   };
 
   return (
@@ -99,16 +129,21 @@ export default function TimerCard({ now }: TimerCardProps) {
       </p>
 
       <div className="mx-auto mt-6 max-w-md">
-        <div className="mb-2 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+        <div className="mb-2 flex items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400">
           <span>Today {formatHours(todayMs)}</span>
           <span>
-            Target {target}h · {progress}%
+            Minimum {limits.minimumHours}h · Maximum {limits.maximumHours}h
           </span>
         </div>
-        <div className="h-2 overflow-hidden rounded-full bg-gray-100 dark:bg-gray-800">
+        <div className="relative h-2 rounded-full bg-gray-100 dark:bg-gray-800">
           <div
-            className="h-full rounded-full bg-primary-600 transition-all"
+            className={`h-full rounded-full transition-all ${underMinimum ? "bg-rose-600" : "bg-emerald-600"}`}
             style={{ width: `${progress}%` }}
+          />
+          <span
+            className="absolute top-1/2 h-3.5 w-0.5 -translate-y-1/2 rounded-full bg-gray-900 dark:bg-white"
+            style={{ left: `${minimumMark}%` }}
+            title={`Minimum ${limits.minimumHours}h`}
           />
         </div>
       </div>
@@ -133,7 +168,7 @@ export default function TimerCard({ now }: TimerCardProps) {
         </select>
         {inProgress.length === 0 ? (
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Move a task to In Progress before starting the timer.
+            Move one of your tasks to In Progress before starting the timer.
           </p>
         ) : null}
 
@@ -149,7 +184,7 @@ export default function TimerCard({ now }: TimerCardProps) {
         ) : (
           <button
             type="button"
-            onClick={handleStart}
+            onClick={requestStart}
             disabled={!selectedId}
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-4 py-3.5 text-base font-semibold text-white shadow-sm transition hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -158,6 +193,16 @@ export default function TimerCard({ now }: TimerCardProps) {
           </button>
         )}
       </div>
+      {notice ? (
+        <DayLimitDialog
+          message={notice}
+          confirmLabel={pendingStart ? (overLimit ? "Take a rest" : "Start timer") : "OK"}
+          secondaryLabel={pendingStart ? (overLimit ? "Start anyway" : "Cancel") : undefined}
+          onConfirm={pendingStart && !overLimit ? () => void beginTiming() : closeNotice}
+          onSecondary={pendingStart ? (overLimit ? () => void beginTiming() : closeNotice) : undefined}
+          onClose={closeNotice}
+        />
+      ) : null}
     </section>
   );
 }

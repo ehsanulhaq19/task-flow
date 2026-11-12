@@ -2,9 +2,9 @@ import csv
 import io
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BadRequestException, ConflictException, NotFoundException
@@ -17,10 +17,14 @@ from app.modules.admin.schemas import (
     AdminTaskResponse,
     AdminTaskUpdate,
     AdminTimeEntryResponse,
+    AdminTimeLogPage,
+    AdminTimeLogPoint,
+    AdminTimeLogSeries,
     OrganizationCreate,
     TaskImportError,
     TaskImportResult,
     UserCreate,
+    UserLimitsUpdate,
 )
 from app.modules.auth.crud import get_user_by_email, get_user_by_id
 from app.modules.auth.models import User
@@ -30,7 +34,10 @@ from app.modules.screenshot.service import resolve_stored_file
 from app.modules.task.crud import list_task_keys
 from app.modules.task.models import Task, TaskComment
 from app.modules.task.service import comment_counts, next_task_key
+from app.modules.cron.daily_report import overlap_seconds, report_zone
 from app.modules.time_entry.models import TimeEntry
+
+RANGES = ("daily", "weekly", "monthly")
 
 
 def slugify(value: str) -> str:
@@ -126,9 +133,44 @@ async def create_user(db: AsyncSession, payload: UserCreate) -> User:
         role=payload.role,
         job_title=payload.job_title or "Team member",
         daily_target_hours=8,
+        configuration_data=(
+            {"minimumHours": 8, "maximumHours": 10} if payload.role == "employee" else {}
+        ),
     )
     user.organization = organization
     db.add(user)
+    await db.flush()
+    return user
+
+
+def user_day_limits(person: User) -> tuple[float, float]:
+    """Return an employee's daily minimum and maximum hours."""
+    data = person.configuration_data or {}
+    try:
+        minimum = float(data.get("minimumHours", person.daily_target_hours or 8))
+    except (TypeError, ValueError):
+        minimum = float(person.daily_target_hours or 8)
+    try:
+        maximum = float(data.get("maximumHours", minimum))
+    except (TypeError, ValueError):
+        maximum = minimum
+    if maximum < minimum:
+        maximum = minimum
+    return minimum, maximum
+
+
+async def update_user_limits(db: AsyncSession, user_id: uuid.UUID, payload: UserLimitsUpdate) -> User:
+    """Set the daily minimum and maximum for an employee."""
+    user = await db.get(User, user_id)
+    if user is None:
+        raise NotFoundException("User not found")
+    if user.role != "employee":
+        raise BadRequestException("Daily limits can only be set for employees")
+    user.configuration_data = {
+        "minimumHours": payload.minimum_hours,
+        "maximumHours": payload.maximum_hours,
+    }
+    user.updated_at = datetime.now(timezone.utc)
     await db.flush()
     return user
 
@@ -439,24 +481,125 @@ async def move_task(db: AsyncSession, task_id: uuid.UUID, status: str) -> AdminT
     return _task_response(task, organization.name, counts.get(task.id, 0))
 
 
+def chart_buckets(kind: str, now: datetime) -> list[tuple[datetime, datetime, str, str]]:
+    """Build daily, weekly, or monthly buckets ending today in the report timezone."""
+    if kind not in RANGES:
+        raise BadRequestException("Date range must be daily, weekly, or monthly")
+    local_now = now.astimezone(report_zone())
+    today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if kind == "weekly":
+        start = today - timedelta(days=today.weekday()) - timedelta(weeks=11)
+        buckets = []
+        for index in range(12):
+            begin = start + timedelta(weeks=index)
+            end = begin + timedelta(weeks=1)
+            buckets.append((begin, end, begin.strftime("%d %b"), f"Week of {begin.strftime('%d %b %Y')}"))
+        return buckets
+    if kind == "monthly":
+        month = today.replace(day=1)
+        start_month = month.month - 11
+        year = month.year
+        while start_month <= 0:
+            start_month += 12
+            year -= 1
+        begin = month.replace(year=year, month=start_month)
+        buckets = []
+        for _ in range(12):
+            if begin.month == 12:
+                end = begin.replace(year=begin.year + 1, month=1)
+            else:
+                end = begin.replace(month=begin.month + 1)
+            buckets.append((begin, end, begin.strftime("%b %Y"), begin.strftime("%B %Y")))
+            begin = end
+        return buckets
+    start = today - timedelta(days=13)
+    buckets = []
+    for index in range(14):
+        begin = start + timedelta(days=index)
+        end = begin + timedelta(days=1)
+        buckets.append((begin, end, begin.strftime("%d %b"), begin.strftime("%A, %d %b %Y")))
+    return buckets
+
+
+def hours_by_user(
+    entries: list[tuple[uuid.UUID, datetime, datetime | None]],
+    buckets: list[tuple[datetime, datetime, str, str]],
+    now: datetime,
+) -> dict[uuid.UUID, list[float]]:
+    """Split each time entry across the chart buckets."""
+    totals = {}
+    for user_id, started_at, ended_at in entries:
+        hours = totals.setdefault(user_id, [0.0] * len(buckets))
+        for index, (begin, end, _, _) in enumerate(buckets):
+            seconds = overlap_seconds(started_at, ended_at, begin, end, now)
+            if seconds > 0:
+                hours[index] += seconds / 3600
+    return {user_id: [round(value, 2) for value in values] for user_id, values in totals.items()}
+
+
 async def list_time_entries(
     db: AsyncSession,
+    admin: User,
     organization_id: uuid.UUID | None,
     user_id: uuid.UUID | None,
-) -> list[AdminTimeEntryResponse]:
-    """Return recent time entries for every user, or one organization or person."""
+    date_range: str,
+    page: int,
+    page_size: int,
+) -> AdminTimeLogPage:
+    """Return one organization's chart and a page of time logs for the selected range."""
+    organization_id = organization_id or admin.organization_id
+    now = datetime.now(timezone.utc)
+    buckets = chart_buckets(date_range, now)
+    range_start = buckets[0][0]
+    range_end = buckets[-1][1]
+    employees = select(User.id).where(User.organization_id == organization_id, User.role != "admin")
+    if user_id is not None:
+        employees = employees.where(User.id == user_id)
+    people_query = select(User).where(User.id.in_(employees)).order_by(User.first_name, User.last_name)
+    people = list((await db.execute(people_query)).scalars().all())
+    overlap = or_(TimeEntry.ended_at.is_(None), TimeEntry.ended_at > range_start)
+    window = (
+        TimeEntry.organization_id == organization_id,
+        TimeEntry.started_at < range_end,
+        overlap,
+        TimeEntry.user_id.in_(employees),
+    )
+    chart_rows = (
+        await db.execute(select(TimeEntry.user_id, TimeEntry.started_at, TimeEntry.ended_at).where(*window))
+    ).all()
+    grouped = hours_by_user(list(chart_rows), buckets, now)
+    series = []
+    for person in people:
+        minimum, maximum = user_day_limits(person)
+        logged = grouped.get(person.id, [0.0] * len(buckets))
+        series.append(
+            AdminTimeLogSeries(
+                user_id=person.id,
+                user_name=f"{person.first_name} {person.last_name}".strip(),
+                points=[
+                    AdminTimeLogPoint(
+                        label=label,
+                        full=full,
+                        hours=logged[index],
+                        minimum_hours=round(minimum * max(1, round((end - begin).total_seconds() / 86400)), 2),
+                        maximum_hours=round(maximum * max(1, round((end - begin).total_seconds() / 86400)), 2),
+                    )
+                    for index, (begin, end, label, full) in enumerate(buckets)
+                ],
+            )
+        )
+    total = int(await db.scalar(select(func.count()).select_from(TimeEntry).where(*window)) or 0)
+    offset = (page - 1) * page_size
     query = (
         select(TimeEntry, User, Organization.name, Task)
         .join(User, TimeEntry.user_id == User.id)
         .join(Organization, TimeEntry.organization_id == Organization.id)
         .outerjoin(Task, TimeEntry.task_id == Task.id)
+        .where(*window)
         .order_by(TimeEntry.started_at.desc())
-        .limit(200)
+        .offset(offset)
+        .limit(page_size)
     )
-    if organization_id is not None:
-        query = query.where(TimeEntry.organization_id == organization_id)
-    if user_id is not None:
-        query = query.where(TimeEntry.user_id == user_id)
     rows = (await db.execute(query)).all()
     entry_ids = [entry.id for entry, _, _, _ in rows]
     counts: dict[uuid.UUID, int] = {}
@@ -468,8 +611,8 @@ async def list_time_entries(
                 .group_by(Screenshot.time_entry_id)
             )
         ).all()
-        counts = {time_entry_id: int(total) for time_entry_id, total in count_rows if time_entry_id is not None}
-    return [
+        counts = {time_entry_id: int(shots) for time_entry_id, shots in count_rows if time_entry_id is not None}
+    items = [
         AdminTimeEntryResponse(
             id=entry.id,
             user_id=person.id,
@@ -485,6 +628,14 @@ async def list_time_entries(
         )
         for entry, person, organization_name, task in rows
     ]
+    return AdminTimeLogPage(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        range=date_range,
+        series=series,
+    )
 
 
 async def list_screenshots(

@@ -12,12 +12,10 @@ export default function SettingsPage() {
   const dispatch = useAppDispatch();
   const user = useAppSelector((state) => state.auth.user);
   const mode = useAppSelector((state) => state.theme.mode);
-  const dailyTargetHours = useAppSelector((state) => state.settings.dailyTargetHours);
   const [firstName, setFirstName] = useState(user?.firstName ?? "");
   const [lastName, setLastName] = useState(user?.lastName ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [role, setRole] = useState(user?.role ?? "");
-  const [target, setTarget] = useState(String(dailyTargetHours));
   const [saving, setSaving] = useState(false);
 
   const handleSave = async (event: FormEvent) => {
@@ -34,11 +32,6 @@ export default function SettingsPage() {
       toast.error("Enter a valid email address");
       return;
     }
-    const hours = Number(target);
-    if (!Number.isFinite(hours) || hours < 1 || hours > 16) {
-      toast.error("Daily target must be between 1 and 16 hours");
-      return;
-    }
     setSaving(true);
     try {
       await dispatch(
@@ -47,7 +40,7 @@ export default function SettingsPage() {
           lastName: nextLast,
           email: nextEmail,
           jobTitle: role.trim() || "Team member",
-          dailyTargetHours: hours,
+          dailyTargetHours: user.dailyTargetHours,
         })
       ).unwrap();
       toast.success("Settings saved");
@@ -79,7 +72,7 @@ export default function SettingsPage() {
         <div>
           <h2 className="text-xl font-bold text-gray-900 dark:text-white">Settings</h2>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            Profile and the hour target are saved to your organization.
+            Profile details are saved to your organization.
           </p>
         </div>
 
@@ -130,21 +123,6 @@ export default function SettingsPage() {
               Job title
             </label>
             <input id="role" className={fieldClass} value={role} onChange={(event) => setRole(event.target.value)} />
-          </div>
-          <div>
-            <label className={labelClass} htmlFor="target">
-              Daily hour target
-            </label>
-            <input
-              id="target"
-              type="number"
-              min={1}
-              max={16}
-              step={0.5}
-              className={fieldClass}
-              value={target}
-              onChange={(event) => setTarget(event.target.value)}
-            />
           </div>
           <button type="submit" className={primaryButtonClass} disabled={saving}>
             {saving ? "Saving..." : "Save changes"}

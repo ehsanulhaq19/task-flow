@@ -59,8 +59,24 @@ def format_clock(moment: datetime, zone: ZoneInfo) -> str:
     return local.strftime("%H:%M")
 
 
+def day_limits(user: User) -> tuple[float, float]:
+    """Return an employee's daily minimum and maximum hours."""
+    data = user.configuration_data or {}
+    try:
+        minimum = float(data.get("minimumHours", user.daily_target_hours or 8))
+    except (TypeError, ValueError):
+        minimum = float(user.daily_target_hours or 8)
+    try:
+        maximum = float(data.get("maximumHours", minimum))
+    except (TypeError, ValueError):
+        maximum = minimum
+    if maximum < minimum:
+        maximum = minimum
+    return minimum, maximum
+
+
 def build_report(users: list[User], entries_by_user: dict, day_start: datetime, day_end: datetime, now: datetime) -> str:
-    """Plain-text daily report of active users and the hours they logged."""
+    """Plain-text daily report of active employees and the hours they logged."""
     zone = day_start.tzinfo
     lines = [
         f"Taskflow daily time report — {day_start.strftime('%d %b %Y')}",
@@ -83,11 +99,14 @@ def build_report(users: list[User], entries_by_user: dict, day_start: datetime, 
             visible_start = max(entry.started_at.astimezone(zone), day_start)
             visible_end = min((entry.ended_at or now).astimezone(zone), day_end, now.astimezone(zone))
             ranges.append(f"{format_clock(visible_start, zone)}–{format_clock(visible_end, zone)}")
+        minimum, maximum = day_limits(user)
         lines.extend(
             [
                 f"{user.first_name} {user.last_name}".strip(),
                 f"Organization: {user.organization_name}",
                 f"Date: {day_start.strftime('%d %b %Y')}",
+                f"Minimum hours: {format_hours(minimum * 3600)}",
+                f"Maximum hours: {format_hours(maximum * 3600)}",
                 f"Time: {', '.join(ranges) if ranges else 'No time logged'}",
                 f"Logged hours: {format_hours(total)}",
                 "",
@@ -112,8 +131,9 @@ async def send_daily_hours_report(now: datetime | None = None) -> None:
     async with async_session() as db:
         try:
             users = await _active_users(db)
-            entries = await _entries_for_day(db, [user.id for user in users], day_start, day_end)
-            body = build_report(users, entries, day_start, day_end, moment)
+            employees = [user for user in users if user.role != "admin"]
+            entries = await _entries_for_day(db, [user.id for user in employees], day_start, day_end)
+            body = build_report(employees, entries, day_start, day_end, moment)
             admins = [user for user in users if user.role == "admin" and user.email]
             if not admins:
                 logger.info("Daily time report skipped: no active admin to receive it")

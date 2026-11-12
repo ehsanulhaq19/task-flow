@@ -1,12 +1,16 @@
 "use client";
 
+import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { HiBars3, HiOutlineStop } from "react-icons/hi2";
 import toast from "react-hot-toast";
-import { formatClock } from "@/lib/format";
-import { initials } from "@/lib/user";
+import DayLimitDialog from "@/components/DayLimitDialog";
 import { useNow } from "@/hooks/useNow";
 import { useScreenCapture } from "@/hooks/useScreenCapture";
+import { dayLimits, dayStatus, stopTimerMessage } from "@/lib/dayLimits";
+import { formatClock, formatHours } from "@/lib/format";
+import { sumOverlap, todayRange } from "@/lib/time";
+import { initials } from "@/lib/user";
 import { stopTimer } from "@/store/slices/timeSlice";
 import { selectOpenSession } from "@/store/selectors";
 import { useAppDispatch, useAppSelector } from "@/store/store";
@@ -23,38 +27,57 @@ type NavbarProps = {
 
 function TimerWidget() {
   const dispatch = useAppDispatch();
+  const user = useAppSelector((state) => state.auth.user);
   const open = useAppSelector(selectOpenSession);
+  const sessions = useAppSelector((state) => state.time.sessions);
   const tasks = useAppSelector((state) => state.tasks.tasks);
   const now = useNow(Boolean(open));
-  if (!open) return null;
-
-  const task = open.taskId ? tasks.find((item) => item.id === open.taskId) : null;
-  const elapsed = Math.max(0, now - new Date(open.startedAt).getTime());
+  const [notice, setNotice] = useState("");
+  const limits = dayLimits(user);
+  const today = todayRange(new Date(now));
+  const todayMs = sumOverlap(sessions, today.start, today.end, now);
+  const underMinimum = dayStatus(todayMs, limits) === "under";
+  const task = open?.taskId ? tasks.find((item) => item.id === open.taskId) : null;
+  const elapsed = open ? Math.max(0, now - new Date(open.startedAt).getTime()) : 0;
+  const tone = underMinimum
+    ? "border-rose-200 bg-rose-50 text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/50 dark:text-rose-200"
+    : "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/50 dark:text-emerald-200";
+  const dot = underMinimum ? "bg-rose-500" : "bg-emerald-500";
 
   return (
-    <div className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 py-1 pl-2.5 pr-1 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/50 dark:text-emerald-200">
-      <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" aria-hidden />
-      <span className="font-mono text-sm font-semibold tabular-nums">{formatClock(elapsed)}</span>
-      {task ? (
-        <span className="hidden max-w-[7rem] truncate text-xs font-medium sm:inline">{task.key}</span>
+    <>
+      <div className={`flex items-center gap-2 rounded-full border py-1 pl-2.5 ${open ? "pr-1" : "pr-2.5"} ${tone}`}>
+        <span className={`h-2 w-2 rounded-full ${open ? "animate-pulse" : ""} ${dot}`} aria-hidden />
+        <span className="font-mono text-sm font-semibold tabular-nums">
+          {open ? formatClock(elapsed) : formatHours(todayMs)}
+        </span>
+        {task ? (
+          <span className="hidden max-w-[7rem] truncate text-xs font-medium sm:inline">{task.key}</span>
+        ) : null}
+        {open ? (
+          <button
+            type="button"
+            onClick={() => {
+              const message = stopTimerMessage(todayMs, limits);
+              void dispatch(stopTimer())
+                .unwrap()
+                .then(() => setNotice(message))
+                .catch((err: unknown) => {
+                  toast.error(typeof err === "string" ? err : "Could not stop the timer");
+                });
+            }}
+            className={`rounded-full p-1 ${underMinimum ? "text-rose-700 hover:bg-rose-100 dark:text-rose-200 dark:hover:bg-rose-900/60" : "text-emerald-700 hover:bg-emerald-100 dark:text-emerald-200 dark:hover:bg-emerald-900/60"}`}
+            aria-label="Stop timer"
+            title="Stop timer"
+          >
+            <HiOutlineStop className="h-4 w-4" />
+          </button>
+        ) : null}
+      </div>
+      {notice ? (
+        <DayLimitDialog message={notice} confirmLabel="OK" onConfirm={() => setNotice("")} onClose={() => setNotice("")} />
       ) : null}
-      <button
-        type="button"
-        onClick={() => {
-          void dispatch(stopTimer())
-            .unwrap()
-            .then(() => toast.success("Timed out"))
-            .catch((err: unknown) => {
-              toast.error(typeof err === "string" ? err : "Could not stop the timer");
-            });
-        }}
-        className="rounded-full p-1 text-emerald-700 hover:bg-emerald-100 dark:text-emerald-200 dark:hover:bg-emerald-900/60"
-        aria-label="Stop timer"
-        title="Stop timer"
-      >
-        <HiOutlineStop className="h-4 w-4" />
-      </button>
-    </div>
+    </>
   );
 }
 

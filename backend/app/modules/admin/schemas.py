@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.core.markdown import normalize_markdown
 from app.modules.task.schemas import Priority, TaskStatus
@@ -75,6 +75,22 @@ class UserCreate(BaseModel):
     def strip_text(cls, value: str) -> str:
         """Store names and titles without surrounding space."""
         return value.strip()
+
+
+class UserLimitsUpdate(BaseModel):
+    """Daily minimum and maximum hours for one employee."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    minimum_hours: float = Field(alias="minimumHours", gt=0, le=24)
+    maximum_hours: float = Field(alias="maximumHours", gt=0, le=24)
+
+    @model_validator(mode="after")
+    def maximum_covers_minimum(self):
+        """Keep the daily cap at or above the hours required to complete the day."""
+        if self.maximum_hours < self.minimum_hours:
+            raise ValueError("Maximum time must be at least the minimum time")
+        return self
 
 
 class AdminTaskCreate(BaseModel):
@@ -243,6 +259,41 @@ class AdminTimeEntryResponse(BaseModel):
     started_at: datetime = Field(serialization_alias="startedAt")
     ended_at: datetime | None = Field(serialization_alias="endedAt")
     screenshot_count: int = Field(serialization_alias="screenshotCount")
+
+
+class AdminTimeLogPoint(BaseModel):
+    """Hours one person logged in a single chart bucket."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    label: str
+    full: str
+    hours: float
+    minimum_hours: float = Field(serialization_alias="minimumHours")
+    maximum_hours: float = Field(serialization_alias="maximumHours")
+
+
+class AdminTimeLogSeries(BaseModel):
+    """One person's hours across the selected date range."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: uuid.UUID = Field(serialization_alias="userId")
+    user_name: str = Field(serialization_alias="userName")
+    points: list[AdminTimeLogPoint]
+
+
+class AdminTimeLogPage(BaseModel):
+    """Chart series for a date range, plus one page of matching time logs."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    items: list[AdminTimeEntryResponse]
+    total: int
+    page: int
+    page_size: int = Field(serialization_alias="pageSize")
+    range: str
+    series: list[AdminTimeLogSeries]
 
 
 class AdminScreenshotResponse(BaseModel):
